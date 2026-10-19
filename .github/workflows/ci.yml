@@ -16,9 +16,9 @@ jobs:
         shell: bash  # same script on both OSes (Git Bash on Windows)
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -39,7 +39,7 @@ jobs:
 
       - name: Upload traceability matrix
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: traceability-${{ matrix.os }}
           path: traceability.md
