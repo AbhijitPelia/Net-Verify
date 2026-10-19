@@ -57,6 +57,10 @@ class Server:
                 data, addr = self._sock.recvfrom(2048)
             except socket.timeout:
                 continue
+            except ConnectionResetError:
+                # Windows (WinError 10054): an earlier ACK hit a closed port. Not fatal.
+                # Must come before OSError, which it subclasses.
+                continue
             except OSError:
                 break
 
