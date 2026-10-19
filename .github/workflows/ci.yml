@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false  # a failure on one OS should not cancel the other
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash  # same script on both OSes (Git Bash on Windows)
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      # -rA prints a one-line PASSED/FAILED summary per test at the end of the log.
+      - name: Run tests and build traceability matrix
+        run: pytest -rA --durations=5 --trace-matrix traceability.md
+
+      - name: Show traceability matrix
+        if: always()
+        run: |
+          cat traceability.md
+          cat traceability.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload traceability matrix
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: traceability-${{ matrix.os }}
+          path: traceability.md

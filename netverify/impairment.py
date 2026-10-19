@@ -11,9 +11,14 @@ their own random number generator, and their own counters.
 Because each packet's delay is drawn independently, jitter can reorder packets,
 as on a real network.
 
-Reproducibility: with a `seed`, the same sequence of packets in a direction gets
-the same drop/delay decisions. The end-to-end run is not bit-for-bit identical,
-because thread scheduling can change how many retransmissions the client makes.
+Reproducibility: with a `seed`, each packet's drop/delay decision is a pure
+function of (seed, direction, packet bytes, copy number), where copy number
+counts how often those exact bytes have passed in that direction (1 for the
+first send, 2 for the first retransmission, ...). Decisions therefore do not
+depend on arrival order or on how many other packets came before. If a slow
+machine causes one extra retransmission, only that message is affected; with a
+single shared random stream, the extra draw would shift every later decision.
+Timing (actual latency) is still up to the OS scheduler and is not reproducible.
 
 The proxy supports one client at a time: replies from the server go to the
 client address the proxy heard from most recently.
@@ -35,16 +40,29 @@ class Impairment:
     jitter_s: float = 0.0  # delay varies uniformly within +/- jitter_s
 
 
+def decide(imp: Impairment, rng: random.Random):
+    """Return the delay in seconds for one packet, or None if it is dropped."""
+    if rng.random() < imp.loss:
+        return None
+    return max(0.0, imp.delay_s + rng.uniform(-imp.jitter_s, imp.jitter_s))
+
+
+def packet_rng(seed, direction: str, data: bytes, copy: int) -> random.Random:
+    """The RNG for one seeded decision; same inputs always give the same RNG state."""
+    return random.Random(f"{seed}:{direction}:{copy}:".encode() + data)
+
+
 class ImpairmentProxy:
     def __init__(self, upstream_addr, c2s=None, s2c=None, seed=None,
                  host: str = "127.0.0.1", port: int = 0):
         self.upstream_addr = upstream_addr
         self.impairments = {"c2s": c2s or Impairment(), "s2c": s2c or Impairment()}
-        # One RNG per direction, so the decisions in one direction do not depend on
-        # how the two receive threads interleave. String seeds are deterministic.
-        self._rngs = {
-            d: random.Random(None if seed is None else f"{seed}:{d}") for d in ("c2s", "s2c")
-        }
+        self.seed = seed
+        # Unseeded runs share one OS-seeded RNG per direction. Seeded runs build a
+        # fresh RNG per packet (see packet_rng), counting copies of each packet here.
+        # Each dict is touched only by its own direction's receive thread.
+        self._rngs = {d: random.Random() for d in ("c2s", "s2c")}
+        self._copies = {d: {} for d in ("c2s", "s2c")}
 
         self._listen_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._listen_sock.bind((host, port))
@@ -97,7 +115,7 @@ class ImpairmentProxy:
 
     def _receive_loop(self, sock, direction: str) -> None:
         imp = self.impairments[direction]
-        rng = self._rngs[direction]
+        copies = self._copies[direction]
         while not self._stop_event.is_set():
             try:
                 data, addr = sock.recvfrom(2048)
@@ -114,10 +132,15 @@ class ImpairmentProxy:
                 self._client_addr = addr
             self._bump(direction, "received")
 
-            if rng.random() < imp.loss:
+            if self.seed is None:
+                rng = self._rngs[direction]
+            else:
+                copies[data] = copies.get(data, 0) + 1
+                rng = packet_rng(self.seed, direction, data, copies[data])
+            delay = decide(imp, rng)
+            if delay is None:
                 self._bump(direction, "dropped")
                 continue
-            delay = max(0.0, imp.delay_s + rng.uniform(-imp.jitter_s, imp.jitter_s))
             with self._queue_cv:
                 heapq.heappush(self._queue, (time.monotonic() + delay, next(self._tiebreak), direction, data))
                 self._queue_cv.notify()

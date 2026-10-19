@@ -8,8 +8,32 @@ import statistics
 
 import pytest
 
+from netverify import protocol
 from netverify.client import Client
-from netverify.impairment import Impairment, ImpairmentProxy
+from netverify.impairment import Impairment, ImpairmentProxy, decide, packet_rng
+
+
+def predicted_attempts(seed, imp, payloads, max_attempts):
+    """Replay the proxy's seeded drop decisions offline, assuming no ACK arrives late.
+
+    Returns, per message, the attempt on which it should be delivered (None = never).
+    The client numbers messages 1, 2, 3, ... and the server ACKs every copy it receives.
+    """
+    ack_copies = {}
+    predicted = []
+    for seq, payload in enumerate(payloads, start=1):
+        msg = protocol.encode(protocol.TYPE_MSG, seq, payload)
+        ack = protocol.encode(protocol.TYPE_ACK, seq)
+        result = None
+        for attempt in range(1, max_attempts + 1):
+            if decide(imp, packet_rng(seed, "c2s", msg, attempt)) is None:
+                continue
+            ack_copies[seq] = ack_copies.get(seq, 0) + 1
+            if decide(imp, packet_rng(seed, "s2c", ack, ack_copies[seq])) is not None:
+                result = attempt
+                break
+        predicted.append(result)
+    return predicted
 
 
 @pytest.mark.req("REQ-006")
@@ -18,12 +42,21 @@ def test_delivery_ratio_with_20_percent_loss_each_way(server, record_property):
     # With 11 attempts, P(message fails) = 0.36 ** 11, about 1.3e-5, so the 99%
     # threshold tests the retransmission logic rather than luck.
     n_messages = 500
+    seed, max_retries = 6, 10
     loss = Impairment(loss=0.20)
-    with ImpairmentProxy(server.address, c2s=loss, s2c=loss, seed=6) as proxy:
-        client = Client(proxy.address, timeout_s=0.05, max_retries=10)
-        results = [client.send(f"msg-{i}".encode()) for i in range(n_messages)]
+    payloads = [f"msg-{i}".encode() for i in range(n_messages)]
+    with ImpairmentProxy(server.address, c2s=loss, s2c=loss, seed=seed) as proxy:
+        client = Client(proxy.address, timeout_s=0.05, max_retries=max_retries)
+        results = [client.send(p) for p in payloads]
         client.close()
         stats = proxy.stats
+
+    # Determinism check, recorded rather than asserted: a late ACK on a loaded machine
+    # can add a retransmission without breaking the requirement.
+    predicted = predicted_attempts(seed, loss, payloads, max_retries + 1)
+    matches = sum(r.attempts == p for r, p in zip(results, predicted))
+    record_property("attempts_match_seeded_prediction", f"{matches}/{n_messages}")
+    record_property("max_attempts", max(r.attempts for r in results))
 
     # Check the test environment itself: the impairment must actually have been applied.
     assert stats["c2s"]["dropped"] > 0 and stats["s2c"]["dropped"] > 0
