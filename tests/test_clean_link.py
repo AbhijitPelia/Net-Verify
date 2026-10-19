@@ -19,12 +19,14 @@ def test_server_acks_valid_message_with_same_sequence_number(server, raw_sock):
 
 
 @pytest.mark.req("REQ-002")
-def test_p95_latency_on_clean_link(server):
+def test_p95_latency_on_clean_link(server, record_property):
     client = Client(server.address)
     results = [client.send(b"x" * 64) for _ in range(200)]
     assert all(r.delivered for r in results)
     latencies = sorted(r.latency_s for r in results)
     p95 = latencies[int(len(latencies) * 0.95) - 1]
+    record_property("p95_latency_ms", f"{p95 * 1000:.3f}")
+    record_property("max_latency_ms", f"{latencies[-1] * 1000:.3f}")
     assert p95 <= 0.050
 
 
@@ -60,14 +62,16 @@ def test_client_retransmits_up_to_max_retries(blackhole):
 
 
 @pytest.mark.req("REQ-008")
-def test_client_gives_up_within_bounded_time(blackhole):
+def test_client_gives_up_within_bounded_time(blackhole, record_property):
     timeout_s, retries = 0.05, 3
     client = Client(blackhole, timeout_s=timeout_s, max_retries=retries)
     start = time.monotonic()
     result = client.send(b"lost")
     elapsed = time.monotonic() - start
+    limit = (retries + 1) * timeout_s + 0.100
+    record_property("give_up_time_ms", f"{elapsed * 1000:.1f} (limit {limit * 1000:.0f})")
     assert result.delivered is False
-    assert elapsed <= (retries + 1) * timeout_s + 0.100
+    assert elapsed <= limit
 
 
 @pytest.mark.req("REQ-009")
